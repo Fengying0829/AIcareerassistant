@@ -52,7 +52,6 @@ async function handleUserRegister(event, headers) {
 
   const now = new Date().toISOString();
   const user = {
-    _id: normalized,
     user_id: normalized,
     quota_remaining: DEFAULT_FREE_QUOTA,
     total_match_count: 0,
