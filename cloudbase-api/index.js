@@ -4,11 +4,13 @@ const tcb = require("@cloudbase/node-sdk");
 const DEEPSEEK_URL = "https://api.deepseek.com/chat/completions";
 const DEFAULT_MODEL = "deepseek-v4-flash";
 const DEFAULT_FREE_QUOTA = 3;
+const REQUIRED_COLLECTIONS = ["users", "quota_logs", "match_jobs", "events"];
 const RESERVED_USER_IDS = new Set(["admin", "root", "system", "null", "undefined", "support"]);
 
 const cloud = tcb.init({ env: tcb.SYMBOL_CURRENT_ENV });
 const db = cloud.database();
 const $ = db.command;
+let ensureCollectionsPromise = null;
 
 exports.main = async function main(event) {
   const method = event.httpMethod || event.requestContext?.http?.method || "GET";
@@ -18,6 +20,8 @@ exports.main = async function main(event) {
   if (method === "OPTIONS") return json(204, {}, headers);
 
   try {
+    if (requiresDatabase(path)) await ensureCollections();
+
     if (method === "POST" && path.endsWith("/api/events")) return await handleEvent(event, headers);
     if (method === "GET" && path.endsWith("/api/analytics")) return await handleAnalytics(headers);
     if (method === "POST" && path.endsWith("/api/user/register")) return await handleUserRegister(event, headers);
@@ -35,6 +39,50 @@ exports.main = async function main(event) {
     }, headers);
   }
 };
+
+function requiresDatabase(path) {
+  return [
+    "/api/events",
+    "/api/analytics",
+    "/api/user/register",
+    "/api/me",
+    "/api/match",
+    "/api/admin/users",
+    "/api/admin/quota/grant"
+  ].some(route => path.endsWith(route));
+}
+
+async function ensureCollections() {
+  if (!ensureCollectionsPromise) {
+    ensureCollectionsPromise = Promise.all(REQUIRED_COLLECTIONS.map(name => ensureCollection(name))).catch(error => {
+      ensureCollectionsPromise = null;
+      throw error;
+    });
+  }
+  await ensureCollectionsPromise;
+}
+
+async function ensureCollection(name) {
+  if (typeof db.createCollectionIfNotExists === "function") {
+    await db.createCollectionIfNotExists(name);
+    return;
+  }
+
+  if (typeof db.checkCollectionExists === "function") {
+    const checked = await db.checkCollectionExists(name);
+    if (checked && checked.Exists) return;
+  }
+
+  if (typeof db.createCollection !== "function") return;
+
+  try {
+    await db.createCollection(name);
+  } catch (error) {
+    const text = `${error.code || ""} ${error.message || ""}`;
+    if (/exist|already|DATABASE_COLLECTION_ALREADY_EXISTS/i.test(text)) return;
+    throw error;
+  }
+}
 
 async function handleUserRegister(event, headers) {
   const { userId } = parseBody(event);
