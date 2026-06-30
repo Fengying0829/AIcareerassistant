@@ -1037,6 +1037,123 @@ async function adminGrantQuota(){
   }catch(err){setMsg('grantMsg',err.message)}
 }
 
+// ===== PASSWORD USER AUTH OVERRIDES =====
+const USER_TOKEN_KEY='aiCareerUserToken';
+function userToken(){return sessionStorage.getItem(USER_TOKEN_KEY)||localStorage.getItem(USER_TOKEN_KEY)||''}
+function setUserToken(token){appState.userToken=token||'';if(token){sessionStorage.setItem(USER_TOKEN_KEY,token);localStorage.setItem(USER_TOKEN_KEY,token)}else{sessionStorage.removeItem(USER_TOKEN_KEY);localStorage.removeItem(USER_TOKEN_KEY)}}
+function userAuthHeaders(){const token=userToken();return token?{Authorization:`Bearer ${token}`}:{}} 
+function userModalHtml(){
+  const current=appState.userId||localStorage.getItem(USER_ID_KEY)||'';
+  return `<button class="modal-x" onclick="hideModals()">×</button>
+    <div class="modal-h"><h2>用户登录</h2><p>注册默认获得 3 次免费匹配</p></div>
+    <div class="modal-b">
+      <div class="ltabs"><button id="loginTabBtn" class="ltab on" onclick="switchUserAuthTab('login')">登录</button><button id="registerTabBtn" class="ltab" onclick="switchUserAuthTab('register')">注册</button></div>
+      <div id="userLoginBox">
+        <div class="ig"><label>用户ID</label><input id="loginUserIdInput" value="${esc(current)}" placeholder="例如 fengying0829"/></div>
+        <div class="ig"><label>密码</label><input id="loginPasswordInput" type="password" placeholder="请输入密码"/></div>
+        <button class="lbtn lbtn-p" onclick="loginUserWithPassword()">登录</button>
+      </div>
+      <div id="userRegisterBox" class="hide">
+        <div class="ig"><label>用户ID</label><input id="registerUserIdInput" value="${esc(current)}" placeholder="4-24 位英文、数字、_ 或 -"/></div>
+        <div class="ig"><label>设置密码</label><input id="registerPasswordInput" type="password" placeholder="至少 8 位"/></div>
+        <div class="ig"><label>确认密码</label><input id="registerPasswordConfirmInput" type="password" placeholder="再次输入密码"/></div>
+        <button class="lbtn lbtn-p" onclick="registerUserWithPassword()">注册并进入</button>
+      </div>
+      <div id="customUserIdMsg" class="mini-note" style="min-height:18px;color:var(--or);margin:8px 0"></div>
+      <div class="mini-note">系统只记住上次用户ID，不保存明文密码。退出后需要重新输入密码。</div>
+    </div>`;
+}
+function switchUserAuthTab(tab){
+  el('loginTabBtn')?.classList.toggle('on',tab==='login');
+  el('registerTabBtn')?.classList.toggle('on',tab==='register');
+  el('userLoginBox')?.classList.toggle('hide',tab!=='login');
+  el('userRegisterBox')?.classList.toggle('hide',tab!=='register');
+  setMsg('customUserIdMsg','');
+}
+function validatePasswordInput(password,confirm){
+  if(String(password||'').length<8)return'密码至少需要 8 位。';
+  if(confirm!==undefined&&password!==confirm)return'两次输入的密码不一致。';
+  return'';
+}
+async function registerUserWithPassword(){
+  const checked=validateCustomUserId(el('registerUserIdInput')?.value);
+  if(!checked.ok){setMsg('customUserIdMsg',checked.message);return}
+  const password=el('registerPasswordInput')?.value||'';
+  const confirm=el('registerPasswordConfirmInput')?.value||'';
+  const passwordMsg=validatePasswordInput(password,confirm);
+  if(passwordMsg){setMsg('customUserIdMsg',passwordMsg);return}
+  setMsg('customUserIdMsg','正在注册...','var(--t2)');
+  try{
+    const data=await postJson('/api/user/register',{userId:checked.userId,password});
+    setUserToken(data.token);applyUser(data.user||data);setMsg('customUserIdMsg','注册成功，正在进入...','var(--gn)');showUserApp();
+  }catch(err){
+    const msg=err.body?.error==='USER_ID_TAKEN'?'该用户ID已存在，请登录。':err.message;
+    setMsg('customUserIdMsg',msg);
+    if(err.body?.error==='USER_ID_TAKEN')switchUserAuthTab('login');
+  }
+}
+async function loginUserWithPassword(){
+  const checked=validateCustomUserId(el('loginUserIdInput')?.value);
+  if(!checked.ok){setMsg('customUserIdMsg',checked.message);return}
+  const password=el('loginPasswordInput')?.value||'';
+  const passwordMsg=validatePasswordInput(password);
+  if(passwordMsg){setMsg('customUserIdMsg',passwordMsg);return}
+  setMsg('customUserIdMsg','正在登录...','var(--t2)');
+  try{
+    const data=await postJson('/api/user/login',{userId:checked.userId,password});
+    setUserToken(data.token);applyUser(data.user||data);setMsg('customUserIdMsg','登录成功，正在进入...','var(--gn)');showUserApp();
+  }catch(err){setMsg('customUserIdMsg',err.message)}
+}
+function registerAndEnterUser(){return registerUserWithPassword()}
+function enterStoredUser(){showModal('user')}
+function enterUser(){if(userToken()){refreshMe().then(showUserApp).catch(()=>showModal('user'))}else showModal('user')}
+function switchUserId(){showModal('user')}
+async function refreshMe(){
+  if(!userToken())throw new Error('请先登录。');
+  const data=await getJson('/api/me',userAuthHeaders());
+  applyUser(data.user||data);return data;
+}
+function applyUser(data){
+  const user=data.user||data;
+  appState.userId=user.user_id;
+  appState.userIdHash=user.user_id;
+  appState.quota=Number(user.quota_remaining||0);
+  localStorage.setItem(USER_ID_KEY,user.user_id);
+  persistQuota();
+}
+function logout(){
+  if(el('viewUser')&&!el('viewUser').classList.contains('hide'))setUserToken('');
+  track('page_view',{page:'entry'});el('viewUser').classList.add('hide');el('viewAdmin').classList.add('hide');el('viewEntry').classList.remove('hide');uReset();setupQuotaModals();persistQuota();
+}
+async function uStartMatch(){
+  if(!userToken()){showModal('user');return}
+  if(!appState.resumeText||!appState.jdText||appState.matchInFlight)return;
+  if(appState.quota<=0){renderQuotaContact();return}
+  appState.matchInFlight=true;uChk();
+  const started=performance.now();const btn=el('uMatch');
+  btn.innerHTML='<div class="spn" style="width:10px;height:10px"></div>分析中...';
+  el('uResult').classList.remove('hide');el('uHint').classList.add('hide');
+  el('uResult').innerHTML=`<div class="rc"><div class="rc-h">匹配分析报告 <span style="font-size:10px;color:var(--ac2);margin-left:4px">调用 DeepSeek 中...</span></div><div class="rc-b" style="text-align:center;padding:36px"><div class="spn" style="width:32px;height:32px;margin:0 auto 10px"></div><div style="font-size:11px;color:var(--t2)">正在生成匹配分、缺口和面试预测</div><div style="font-size:9px;color:var(--mt)">解析文本 -> 请求服务端 -> DeepSeek -> 扣减配额</div></div></div>`;
+  el('uResult').scrollIntoView({behavior:'smooth'});setPipe('up4','act');
+  track('match_start',{resume_text_len:appState.resumeText.length,jd_text_len:appState.jdText.length,model:MODEL_NAME,page:'user_app'});
+  try{
+    if(!canUseApi())throw new Error('当前是 file:// 预览，无法调用 /api/match。请用 CloudBase 域名打开页面。');
+    const data=await postJson('/api/match',{resumeText:appState.resumeText,jdText:appState.jdText,fileMeta:appState.resumeMeta,sessionId:appState.sessionId},userAuthHeaders());
+    if(data.user)applyUser(data.user);
+    setPipe('up4','done');setPipe('up5','done');setPipe('up6','done');
+    appState.matchReport=normalizeReport(data);renderUR();setPipe('up7','done');
+    const usage=appState.matchReport.usage||{};
+    track('match_success',{score:appState.matchReport.score,latency_ms:Math.round(performance.now()-started),model:usage.model||MODEL_NAME,input_tokens:usage.input_tokens||0,output_tokens:usage.output_tokens||0,estimated_cost_usd:usage.estimated_cost_usd||0,page:'user_app'});
+  }catch(err){
+    if(err.body?.error==='USER_UNAUTHORIZED'){setUserToken('');showModal('user')}
+    else if(err.body?.error==='QUOTA_EXHAUSTED'){if(err.body.user)applyUser(err.body.user);renderQuotaContact()}
+    else{setPipe('up4','wait');setPipe('up5','wait');setPipe('up6','wait');renderMatchError(err.message)}
+    track('match_failed',{latency_ms:Math.round(performance.now()-started),model:MODEL_NAME,error_code:(err.body?.error||err.status||err.message||'unknown').toString(),page:'user_app'});
+  }finally{
+    appState.matchInFlight=false;btn.innerHTML='<svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L14.5 9.5L22 12L14.5 14.5L12 22L9.5 14.5L2 12L9.5 9.5L12 2Z"/></svg>重新匹配';uChk();
+  }
+}
+
 // ===== DRAG, SCROLL, INIT =====
 document.addEventListener('dragover',e=>{const z=e.target.closest&&e.target.closest('#resumeDropZone');if(z){e.preventDefault();z.classList.add('drag')}});
 document.addEventListener('dragleave',e=>{const z=e.target.closest&&e.target.closest('#resumeDropZone');if(z)z.classList.remove('drag')});
