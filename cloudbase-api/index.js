@@ -861,3 +861,63 @@ function verifyToken(token, secret = process.env.ADMIN_TOKEN_SECRET || process.e
     return null;
   }
 }
+
+async function handleEvent(event, headers) {
+  const raw = parseBody(event);
+  const eventDoc = sanitizeEvent(raw);
+  await db.collection("events").add(eventDoc);
+
+  const userId = normalizeUserId(raw.user_id_hash || raw.userId || "");
+  if (userId && !validateUserId(userId) && eventDoc.event_name === "resume_parse_success") {
+    try {
+      await db.collection("users").doc(userId).update({
+        total_upload_count: $.inc(1),
+        last_active_at: new Date().toISOString()
+      });
+    } catch {}
+  }
+
+  return json(200, { ok: true }, headers);
+}
+
+async function handleAnalytics(headers) {
+  const [eventsResult, jobsResult, usersResult] = await Promise.all([
+    db.collection("events").orderBy("timestamp", "desc").limit(500).get().catch(() => ({ data: [] })),
+    db.collection("match_jobs").orderBy("created_at", "desc").limit(500).get().catch(() => ({ data: [] })),
+    db.collection("users").orderBy("last_active_at", "desc").limit(500).get().catch(() => ({ data: [] }))
+  ]);
+
+  const events = eventsResult.data || [];
+  const jobs = jobsResult.data || [];
+  const users = usersResult.data || [];
+  const countEvent = name => events.filter(e => e.event_name === name).length;
+  const eventScores = events
+    .filter(e => e.event_name === "match_success")
+    .map(e => Number(e.properties?.score || 0))
+    .filter(Boolean);
+  const jobScores = jobs.map(j => Number(j.score || 0)).filter(Boolean);
+  const scores = jobScores.length ? jobScores : eventScores;
+  const eventCost = events.reduce((sum, e) => sum + Number(e.properties?.estimated_cost_usd || 0), 0);
+  const jobCost = jobs.reduce((sum, j) => sum + Number(j.estimated_cost_usd || 0), 0);
+  const userUploads = users.reduce((sum, u) => sum + Number(u.total_upload_count || 0), 0);
+  const topEvents = Object.entries(events.reduce((memo, e) => {
+    memo[e.event_name] = (memo[e.event_name] || 0) + 1;
+    return memo;
+  }, {})).sort((a, b) => b[1] - a[1]).map(([event_name, count]) => ({ event_name, count }));
+
+  return json(200, {
+    source: "cloudbase",
+    totals: {
+      pv: countEvent("page_view"),
+      uploads: countEvent("resume_parse_success") || userUploads,
+      matches: jobs.length || countEvent("match_success"),
+      failures: countEvent("match_failed") + countEvent("resume_parse_failed"),
+      apiCostUsd: Number((jobCost || eventCost).toFixed(6)),
+      averageScore: scores.length ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length) : 0
+    },
+    topEvents,
+    recentEvents: events,
+    users: users.map(publicUser),
+    feedback: events.filter(e => e.event_name === "feedback_submit").slice(0, 50)
+  }, headers);
+}

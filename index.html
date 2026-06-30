@@ -1154,6 +1154,27 @@ async function uStartMatch(){
   }
 }
 
+function track(eventName,properties={}){
+  const finalProps=sanitizeProps({...eventContext(),...properties});
+  const payload={
+    event_name:eventName,
+    user_id_hash:appState.userIdHash||appState.userId||'anonymous',
+    session_id:appState.sessionId,
+    timestamp:new Date().toISOString(),
+    properties:finalProps
+  };
+  appState.localEvents.unshift(payload);persistLocalEvents();
+  if(appState.currentAdminPage)appState.analytics=buildLocalAnalytics();
+  sendGAEvent(eventName,finalProps);
+  if(!canUseApi()){queuePendingEvent(payload);return}
+  fetch(apiUrl('/api/events'),{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(payload),
+    keepalive:true
+  }).catch(()=>queuePendingEvent(payload));
+}
+
 // ===== DRAG, SCROLL, INIT =====
 document.addEventListener('dragover',e=>{const z=e.target.closest&&e.target.closest('#resumeDropZone');if(z){e.preventDefault();z.classList.add('drag')}});
 document.addEventListener('dragleave',e=>{const z=e.target.closest&&e.target.closest('#resumeDropZone');if(z)z.classList.remove('drag')});
