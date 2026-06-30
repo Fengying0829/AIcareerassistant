@@ -8,7 +8,7 @@
 // 上线前把下面两个值改成你的真实地址：
 // window.AI_CAREER_API_BASE = "https://api.your-domain.com";
 // window.AI_CAREER_GA_ID = "G-XXXXXXXXXX";
-window.AI_CAREER_API_BASE = window.AI_CAREER_API_BASE || "https://aicareer-backend-d2e54v66c91ca26-1448842506.ap-shanghai.app.tcloudbase.com";
+window.AI_CAREER_API_BASE = window.AI_CAREER_API_BASE || "";
 window.AI_CAREER_GA_ID = window.AI_CAREER_GA_ID || "";
 (function(){
   const gaId=window.AI_CAREER_GA_ID;
@@ -448,7 +448,9 @@ const appState={
   matchReport:null,
   matchInFlight:false,
   currentAdminPage:'dash',
-  quota:Number(localStorage.getItem('aiCareerQuota')||3),
+  quota:0,
+  userId:localStorage.getItem('aiCareerCustomUserId')||'',
+  adminToken:sessionStorage.getItem('aiCareerAdminToken')||'',
   sessionId:getOrCreateId('aiCareerSessionId'),
   userIdHash:getOrCreateId('aiCareerAnonUser'),
   localEvents:loadLocalEvents(),
@@ -534,8 +536,17 @@ async function flushPendingEvents(){
   localStorage.removeItem('aiCareerPendingEvents');
   for(const item of q){try{await fetch(apiUrl('/api/events'),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(item)})}catch{queuePendingEvent(item);break}}
 }
-async function postJson(path,data){
-  const res=await fetch(apiUrl(path),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+async function postJson(path,data,headers={}){
+  const res=await fetch(apiUrl(path),{method:'POST',headers:{'Content-Type':'application/json',...headers},body:JSON.stringify(data)});
+  const text=await res.text();
+  let json={};
+  try{json=text?JSON.parse(text):{}}catch{json={message:text}}
+  if(!res.ok)throw Object.assign(new Error(json.message||`接口请求失败 (${res.status})`),{status:res.status,body:json});
+  return json;
+}
+
+async function getJson(path,headers={}){
+  const res=await fetch(apiUrl(path),{headers});
   const text=await res.text();
   let json={};
   try{json=text?JSON.parse(text):{}}catch{json={message:text}}
@@ -821,13 +832,218 @@ function admFeedback(){
   return`<div class="chart-box"><div class="chart-t">用户反馈</div>${rows.length?rows.map(f=>`<div>${esc(f.text)}</div>`).join(''):'<div class="empty">暂无真实反馈数据。接入 feedback_submit 事件或反馈表后展示。</div>'}</div><div class="mini-note" style="text-align:center;margin-top:8px">低分反馈只进入匿名统计，不直接用于训练，除非用户明确授权。</div>`;
 }
 
+// ===== REAL USER ID + QUOTA LOOP =====
+const USER_ID_KEY='aiCareerCustomUserId';
+const ADMIN_TOKEN_KEY='aiCareerAdminToken';
+const USER_ID_RESERVED=new Set(['admin','root','system','null','undefined','support']);
+function initQuotaApp(){
+  setupQuotaModals();
+  setupUserChip();
+  appState.userId=localStorage.getItem(USER_ID_KEY)||appState.userId||'';
+  appState.adminToken=sessionStorage.getItem(ADMIN_TOKEN_KEY)||appState.adminToken||'';
+  if(appState.userId){appState.userIdHash=appState.userId;refreshMe().catch(()=>{})}
+  persistQuota();
+}
+function setupQuotaModals(){
+  const userModal=el('userModal')?.querySelector('.modal');
+  if(userModal) userModal.innerHTML=userModalHtml();
+  const adminModal=el('adminModal')?.querySelector('.modal');
+  if(adminModal) adminModal.innerHTML=adminModalHtml();
+  const payModal=el('payModal')?.querySelector('.modal');
+  if(payModal) payModal.innerHTML=quotaContactHtml();
+}
+function setupUserChip(){
+  if(el('userIdChip'))return;
+  const q=el('qNum');
+  const bar=q&&q.closest('.tb-r');
+  if(!bar)return;
+  const chip=document.createElement('div');
+  chip.className='qc';
+  chip.id='userIdChip';
+  chip.style.maxWidth='220px';
+  chip.innerHTML='<span>用户ID</span> <b id="userIdText">未创建</b>';
+  bar.insertBefore(chip,bar.firstChild);
+}
+function userModalHtml(){
+  const current=appState.userId||localStorage.getItem(USER_ID_KEY)||'';
+  return `<button class="modal-x" onclick="hideModals()">×</button>
+    <div class="modal-h"><h2>创建你的用户ID</h2><p>新用户默认获得 3 次免费匹配</p></div>
+    <div class="modal-b">
+      <div class="ig"><label>用户ID</label><input id="customUserIdInput" value="${esc(current)}" placeholder="例如 fengying0829"/></div>
+      <div class="mini-note">4-24 位，只能用英文、数字、下划线或短横线。用户ID不能重复，创建后管理员会按这个ID给你加次数。</div>
+      <div id="customUserIdMsg" class="mini-note" style="min-height:18px;color:var(--or);margin:8px 0"></div>
+      <button class="lbtn lbtn-p" onclick="registerAndEnterUser()">检查并进入</button>
+      ${current?'<button class="lbtn lbtn-w" onclick="enterStoredUser()">使用当前用户ID进入</button><button class="lbtn lbtn-w" onclick="switchUserId()">更换用户ID</button>':''}
+    </div>`;
+}
+function adminModalHtml(){
+  return `<button class="modal-x" onclick="hideModals()">×</button>
+    <div class="modal-h"><h2>管理员登录</h2><p>账号密码只在后端校验，页面不再显示默认密码</p></div>
+    <div class="modal-b">
+      <div class="ig"><label>管理员账号</label><input id="adminUsernameInput" placeholder="请输入管理员账号"/></div>
+      <div class="ig"><label>密码</label><input id="adminPasswordInput" type="password" placeholder="请输入管理员密码"/></div>
+      <div id="adminLoginMsg" class="mini-note" style="min-height:18px;color:var(--or);margin:8px 0"></div>
+      <button class="lbtn lbtn-p" style="background:linear-gradient(135deg,#E17055,#D63031)" onclick="adminLogin()">登录管理后台</button>
+    </div>`;
+}
+function quotaContactHtml(){
+  return `<button class="modal-x" onclick="el('payModal').classList.add('hide')">×</button>
+    <div class="modal-h"><h2>免费次数已用完</h2><p>请联系管理员添加次数</p></div>
+    <div class="modal-b">
+      <div class="pay-c"><div class="pay-p">0 <span>次剩余</span></div><div class="pay-d">请把下面的用户ID发给管理员，由管理员在后台为你添加次数。</div></div>
+      <div class="ig"><label>你的用户ID</label><input id="quotaUserIdCopy" readonly value="${esc(appState.userId||'未创建')}"/></div>
+      <button class="lbtn lbtn-p" onclick="copyUserId()">复制用户ID</button>
+    </div>`;
+}
+function showModal(role){
+  if(role==='user')setupQuotaModals();
+  if(role==='admin')setupQuotaModals();
+  el(role+'Modal').classList.remove('hide');
+}
+function validateCustomUserId(userId){
+  const v=String(userId||'').trim().toLowerCase();
+  if(!/^[a-z0-9_-]{4,24}$/.test(v))return{ok:false,message:'用户ID需要 4-24 位，只能使用英文、数字、下划线或短横线。'};
+  if(/^\d{11}$/.test(v)||USER_ID_RESERVED.has(v))return{ok:false,message:'这个用户ID不可使用，请换一个。'};
+  return{ok:true,userId:v};
+}
+function setMsg(id,msg,color='var(--or)'){const node=el(id);if(node){node.style.color=color;node.textContent=msg||''}}
+async function registerAndEnterUser(){
+  const input=el('customUserIdInput');
+  const checked=validateCustomUserId(input&&input.value);
+  if(!checked.ok){setMsg('customUserIdMsg',checked.message);return}
+  setMsg('customUserIdMsg','正在检查用户ID是否可用...','var(--t2)');
+  try{
+    const data=await postJson('/api/user/register',{userId:checked.userId});
+    applyUser(data);setMsg('customUserIdMsg','创建成功，正在进入...','var(--gn)');
+    showUserApp();
+  }catch(err){
+    const msg=err.body?.error==='USER_ID_TAKEN'?'这个用户ID已被使用，请换一个。':err.message;
+    setMsg('customUserIdMsg',msg);
+  }
+}
+async function enterStoredUser(){
+  if(!appState.userId){showModal('user');return}
+  try{await refreshMe();showUserApp()}catch(err){setMsg('customUserIdMsg',err.message)}
+}
+function enterUser(){return enterStoredUser()}
+function switchUserId(){
+  if(!confirm('更换用户ID会切换到另一个账号，原次数不会迁移。确定更换吗？'))return;
+  localStorage.removeItem(USER_ID_KEY);appState.userId='';appState.userIdHash=getOrCreateId('aiCareerAnonUser');appState.quota=0;persistQuota();setupQuotaModals();showModal('user');
+}
+function showUserApp(){
+  hideModals();el('viewEntry').classList.add('hide');el('viewUser').classList.remove('hide');track('page_view',{page:'user_app'});flushPendingEvents();uChk();
+}
+async function refreshMe(){
+  if(!appState.userId)throw new Error('请先创建用户ID。');
+  const data=await getJson(`/api/me?userId=${encodeURIComponent(appState.userId)}`);
+  applyUser(data);return data;
+}
+function applyUser(data){
+  const user=data.user||data;
+  appState.userId=user.user_id;
+  appState.userIdHash=user.user_id;
+  appState.quota=Number(user.quota_remaining||0);
+  localStorage.setItem(USER_ID_KEY,user.user_id);
+  persistQuota();
+}
+function persistQuota(){
+  const q=el('qNum');if(q)q.textContent=appState.quota;
+  const u=el('userIdText');if(u)u.textContent=appState.userId||'未创建';
+  const copy=el('quotaUserIdCopy');if(copy)copy.value=appState.userId||'未创建';
+}
+function renderQuotaContact(){
+  setupQuotaModals();el('payModal').classList.remove('hide');track('quota_exhausted',{page:'user_app',status:'contact_admin'});
+}
+function copyUserId(){
+  const id=appState.userId||'';
+  if(navigator.clipboard&&id)navigator.clipboard.writeText(id);
+  const input=el('quotaUserIdCopy');if(input)input.select();
+}
+function doPay(){renderQuotaContact()}
+function authHeaders(){return appState.adminToken?{Authorization:`Bearer ${appState.adminToken}`}:{}} 
+async function adminLogin(){
+  const username=el('adminUsernameInput')?.value||'';
+  const password=el('adminPasswordInput')?.value||'';
+  setMsg('adminLoginMsg','正在登录...','var(--t2)');
+  try{
+    const data=await postJson('/api/admin/login',{username,password});
+    appState.adminToken=data.token;sessionStorage.setItem(ADMIN_TOKEN_KEY,data.token);
+    setMsg('adminLoginMsg','登录成功','var(--gn)');showAdminApp();
+  }catch(err){setMsg('adminLoginMsg',err.message)}
+}
+function enterAdmin(){setupQuotaModals();if(appState.adminToken)showAdminApp();else showModal('admin')}
+function showAdminApp(){hideModals();el('viewEntry').classList.add('hide');el('viewAdmin').classList.remove('hide');track('page_view',{page:'admin_app'});loadAnalytics().then(()=>renderAdmPage(appState.currentAdminPage))}
+function logout(){
+  track('page_view',{page:'entry'});el('viewUser').classList.add('hide');el('viewAdmin').classList.add('hide');el('viewEntry').classList.remove('hide');uReset();
+}
+async function uStartMatch(){
+  if(!appState.userId){showModal('user');return}
+  if(!appState.resumeText||!appState.jdText||appState.matchInFlight)return;
+  if(appState.quota<=0){renderQuotaContact();return}
+  appState.matchInFlight=true;uChk();
+  const started=performance.now();const btn=el('uMatch');
+  btn.innerHTML='<div class="spn" style="width:10px;height:10px"></div>分析中...';
+  el('uResult').classList.remove('hide');el('uHint').classList.add('hide');
+  el('uResult').innerHTML=`<div class="rc"><div class="rc-h">匹配分析报告 <span style="font-size:10px;color:var(--ac2);margin-left:4px">调用 DeepSeek 中...</span></div><div class="rc-b" style="text-align:center;padding:36px"><div class="spn" style="width:32px;height:32px;margin:0 auto 10px"></div><div style="font-size:11px;color:var(--t2)">正在生成匹配分、缺口和面试预测</div><div style="font-size:9px;color:var(--mt)">解析文本 -> 请求服务端 -> DeepSeek -> 扣减配额</div></div></div>`;
+  el('uResult').scrollIntoView({behavior:'smooth'});setPipe('up4','act');
+  track('match_start',{resume_text_len:appState.resumeText.length,jd_text_len:appState.jdText.length,model:MODEL_NAME,page:'user_app'});
+  try{
+    if(!canUseApi())throw new Error('当前是 file:// 预览，无法调用 /api/match。请用 CloudBase 域名打开页面。');
+    const data=await postJson('/api/match',{resumeText:appState.resumeText,jdText:appState.jdText,fileMeta:appState.resumeMeta,userId:appState.userId,sessionId:appState.sessionId});
+    if(data.user)applyUser(data.user);
+    setPipe('up4','done');setPipe('up5','done');setPipe('up6','done');
+    appState.matchReport=normalizeReport(data);renderUR();setPipe('up7','done');
+    const usage=appState.matchReport.usage||{};
+    track('match_success',{score:appState.matchReport.score,latency_ms:Math.round(performance.now()-started),model:usage.model||MODEL_NAME,input_tokens:usage.input_tokens||0,output_tokens:usage.output_tokens||0,estimated_cost_usd:usage.estimated_cost_usd||0,page:'user_app'});
+  }catch(err){
+    if(err.body?.error==='QUOTA_EXHAUSTED'){if(err.body.user)applyUser(err.body.user);renderQuotaContact()}
+    else{setPipe('up4','wait');setPipe('up5','wait');setPipe('up6','wait');renderMatchError(err.message)}
+    track('match_failed',{latency_ms:Math.round(performance.now()-started),model:MODEL_NAME,error_code:(err.body?.error||err.status||err.message||'unknown').toString(),page:'user_app'});
+  }finally{
+    appState.matchInFlight=false;btn.innerHTML='<svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L14.5 9.5L22 12L14.5 14.5L12 22L9.5 14.5L2 12L9.5 9.5L12 2Z"/></svg>重新匹配';uChk();
+  }
+}
+async function loadAnalytics(){
+  let base=buildLocalAnalytics();
+  if(canUseApi()){
+    try{const res=await fetch(apiUrl('/api/analytics'));if(res.ok)base=await res.json()}catch{}
+  }
+  if(appState.adminToken){
+    try{const users=await getJson('/api/admin/users',authHeaders());base.users=users.users||[]}catch{}
+  }
+  appState.analytics=base;
+}
+function admUserPage(){
+  const users=(appState.analytics&&appState.analytics.users)||[];
+  if(!appState.adminToken)return`<div class="chart-box"><div class="chart-t">用户管理</div><div class="empty">请先登录管理员账号。</div></div>`;
+  return`<div class="chart-box"><div class="chart-t">用户管理</div>${users.length?`<table class="adm-tbl"><thead><tr><th>用户ID</th><th>剩余次数</th><th>匹配次数</th><th>上传次数</th><th>最近活跃</th></tr></thead><tbody>${users.map(u=>`<tr><td>${esc(u.user_id)}</td><td>${u.quota_remaining}</td><td>${u.total_match_count}</td><td>${u.total_upload_count}</td><td>${esc((u.last_active_at||'').replace('T',' ').slice(0,19))}</td></tr>`).join('')}</tbody></table>`:'<div class="empty">暂无用户。用户创建ID后会出现在这里。</div>'}</div>`;
+}
+function admQuotaPage(){
+  return`<div class="quota-ctrl"><h4>配额管理</h4>
+    <div class="qr"><input id="grantUserId" placeholder="用户ID，如 fengying0829"><input id="grantAmount" type="number" min="1" max="999" value="5" placeholder="增加次数"><button class="bt bt-p" onclick="adminGrantQuota()">发放次数</button></div>
+    <div id="grantMsg" class="mini-note">只给已存在用户加次数；如果用户ID填错，系统会提示用户不存在。</div>
+  </div>`;
+}
+async function adminGrantQuota(){
+  const userId=(el('grantUserId')?.value||'').trim().toLowerCase();
+  const amount=Number(el('grantAmount')?.value||0);
+  const checked=validateCustomUserId(userId);
+  if(!checked.ok){setMsg('grantMsg',checked.message);return}
+  setMsg('grantMsg','正在发放...','var(--t2)');
+  try{
+    const data=await postJson('/api/admin/quota/grant',{userId:checked.userId,amount},authHeaders());
+    setMsg('grantMsg',`已为 ${data.user.user_id} 增加次数，当前剩余 ${data.user.quota_remaining} 次。`,'var(--gn)');
+    await loadAnalytics();
+  }catch(err){setMsg('grantMsg',err.message)}
+}
+
 // ===== DRAG, SCROLL, INIT =====
 document.addEventListener('dragover',e=>{const z=e.target.closest&&e.target.closest('#resumeDropZone');if(z){e.preventDefault();z.classList.add('drag')}});
 document.addEventListener('dragleave',e=>{const z=e.target.closest&&e.target.closest('#resumeDropZone');if(z)z.classList.remove('drag')});
 document.addEventListener('drop',e=>{const z=e.target.closest&&e.target.closest('#resumeDropZone');if(z){e.preventDefault();z.classList.remove('drag');if(e.dataTransfer.files&&e.dataTransfer.files[0])handleResumeFile(e.dataTransfer.files[0])}});
 let maxScrollDepth=0;
 el('uCt').addEventListener('scroll',()=>{const c=el('uCt');const depth=Math.round(((c.scrollTop+c.clientHeight)/Math.max(c.scrollHeight,1))*100);if(depth>=25&&depth>maxScrollDepth+24){maxScrollDepth=depth;track('scroll_depth',{scroll_depth:Math.min(100,depth),page:'user_app'})}});
-persistQuota();renderResumeEmpty();renderJDEmpty();renderAdmPage('dash');track('page_view',{page:'entry'});
+initQuotaApp();renderResumeEmpty();renderJDEmpty();renderAdmPage('dash');track('page_view',{page:'entry'});
 </script>
 </body>
 </html>
